@@ -1,13 +1,16 @@
-FROM php:8.2-apache
+FROM php:8.1-apache
 
-# Enable mod_rewrite for Apache
+# Enable Apache mod_rewrite
 RUN a2enmod rewrite
 
-# Set working directory
+# Copy all files
 WORKDIR /var/www/html
-
-# Copy project files
 COPY . .
 
-# Make sure data dir is writable
-RUN mkdir -p data && chmod -R 777 data users.json
+# Create writable folders and files
+RUN mkdir -p data && \
+    touch users.json && \
+    chmod -R 777 data users.json
+
+# Expose port
+EXPOSE 80
