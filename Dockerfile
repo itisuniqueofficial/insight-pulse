@@ -1,6 +1,13 @@
-FROM php:8.2-cli
+FROM php:8.2-apache
 
-WORKDIR /app
+# Enable mod_rewrite for Apache
+RUN a2enmod rewrite
+
+# Set working directory
+WORKDIR /var/www/html
+
+# Copy project files
 COPY . .
 
-CMD ["php", "bot.php"]
+# Make sure data dir is writable
+RUN mkdir -p data && chmod -R 777 data users.json
