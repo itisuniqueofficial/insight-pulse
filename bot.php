@@ -1,179 +1,87 @@
 <?php
-// ─── CONFIG ─────────────────────────────────────────────────────────────
-$botToken    = getenv('BOT_TOKEN');
-$adminId     = getenv('ADMIN_ID');
-$channelId   = getenv('CHANNEL_ID');
-$botUsername = getenv('BOT_USERNAME');
-$usersFile   = __DIR__ . '/users.json';
 
-$apiURL = "https://api.telegram.org/bot$botToken/";
+$botToken = getenv('BOT_TOKEN');
+$adminId = getenv('ADMIN_ID');
+$channelId = getenv('CHANNEL_ID');
 
-// ─── UPDATE HANDLING ────────────────────────────────────────────────────
-$update = json_decode(file_get_contents('php://input'), true);
-if (!$update || !isset($update['message'])) exit;
+// Read incoming Telegram update
+$update = json_decode(file_get_contents("php://input"), true);
 
-$message   = $update['message'];
-$chatId    = $message['chat']['id'];
-$userId    = $message['from']['id'];
-$messageId = $message['message_id'];
-$text      = $message['text'] ?? '';
-
-// ─── USER TRACKING ──────────────────────────────────────────────────────
-$users = file_exists($usersFile)
-    ? json_decode(file_get_contents($usersFile), true)
-    : [];
-if (!in_array($chatId, $users)) {
-    $users[] = $chatId;
-    file_put_contents($usersFile, json_encode($users, JSON_PRETTY_PRINT));
-}
-
-// ─── HELPERS ────────────────────────────────────────────────────────────
-function apiRequest(string $method, array $params = []) {
-    global $apiURL;
-    $ch = curl_init($apiURL . $method);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $params);
-    $res = curl_exec($ch);
-    curl_close($ch);
-    return json_decode($res, true);
-}
-
-function sendMessage(int $chatId, string $text, int $replyTo = null) {
-    $params = [
-        'chat_id' => $chatId,
-        'text' => $text,
-        'parse_mode' => 'Markdown',
-        'disable_web_page_preview' => true,
-    ];
-    if ($replyTo) $params['reply_to_message_id'] = $replyTo;
-    apiRequest('sendMessage', $params);
-}
-
-function forwardToChannel(array $message) {
-    global $channelId;
-    return apiRequest('forwardMessage', [
-        'chat_id'      => $channelId,
-        'from_chat_id' => $message['chat']['id'],
-        'message_id'   => $message['message_id'],
-    ]);
-}
-
-function copyMessage(int $toChat, int $fromChat, int $msgId) {
-    return apiRequest('copyMessage', [
-        'chat_id'      => $toChat,
-        'from_chat_id' => $fromChat,
-        'message_id'   => $msgId,
-    ]);
-}
-
-function buildFileId(int $userId, int $msgId): string {
-    return time() . '_' . $userId . '_' . $msgId;
-}
-
-function parseFileId(string $fileId): array|false {
-    $parts = explode('_', $fileId);
-    if (count($parts) !== 3 || !ctype_digit($parts[0]) || !ctype_digit($parts[1]) || !ctype_digit($parts[2])) {
-        return false;
+// Handle messages
+if (isset($update["message"])) {
+    $message = $update["message"];
+    $chatId = $message["chat"]["id"];
+    $text = trim($message["text"] ?? '');
+    $userId = $message["from"]["id"];
+    
+    // Reply to /start
+    if ($text === "/start") {
+        file_put_contents("users.json", json_encode(array_unique(array_merge(json_decode(@file_get_contents("users.json"), true) ?? [], [$userId]))));
+        sendMessage($chatId, "👋 Welcome! Send me a file to get your File ID.\n\nTo retrieve a file, use: `/get <file_id>`", true);
     }
-    return [
-        'timestamp'   => (int)$parts[0],
-        'user_id'     => (int)$parts[1],
-        'message_id'  => (int)$parts[2],
-    ];
-}
 
-// ─── COMMANDS ────────────────────────────────────────────────────────────
-// /start [deep_link]
-if (stripos($text, '/start') === 0) {
-    $args = trim(substr($text, 6));
-    if ($args !== '') {
-        $info = parseFileId($args);
-        if (!$info) {
-            sendMessage($chatId, "❌ *Invalid File ID format.*", $messageId);
-            exit;
+    // Handle file upload (document, photo, video, etc.)
+    $fileTypes = ['document', 'video', 'photo', 'audio', 'voice'];
+    foreach ($fileTypes as $type) {
+        if (isset($message[$type])) {
+            $file = $message[$type];
+            $fileId = is_array($file) ? end($file)["file_id"] : $file["file_id"];
+            $caption = $message["caption"] ?? '';
+            $uniqueId = str_replace(['-', '+', '_'], '', base64_encode(random_bytes(6)));
+
+            file_put_contents("data/$uniqueId.json", json_encode([
+                "file_id" => $fileId,
+                "type" => $type,
+                "caption" => $caption
+            ]));
+
+            sendMessage($chatId, "✅ File saved!\n\n🆔 File ID: `$uniqueId`", true);
         }
-        $res = copyMessage($chatId, $channelId, $info['message_id']);
-        if (empty($res['ok'])) {
-            sendMessage($chatId, "❌ *File not found or expired.*", $messageId);
+    }
+
+    // Handle /get command
+    if (str_starts_with($text, "/get")) {
+        $parts = explode(" ", $text);
+        $fileId = $parts[1] ?? null;
+        if ($fileId && file_exists("data/$fileId.json")) {
+            $data = json_decode(file_get_contents("data/$fileId.json"), true);
+            sendFile($chatId, $data);
+        } else {
+            sendMessage($chatId, "❌ File not found.", true);
         }
-    } else {
-        $msg  = "👋 *Welcome to Report Cloud Storage Bot!*\n\n";
-        $msg .= "📤 Send any file (photo, video, doc, audio, etc.) to save it.\n";
-        $msg .= "🆔 You’ll get a unique File ID and deep link.\n\n";
-        $msg .= "📥 To retrieve, send me the File ID or click your deep link.\n";
-        $msg .= "\n❓ Use /help to see commands.";
-        sendMessage($chatId, $msg, $messageId);
     }
-    exit;
-}
 
-// /help
-if (stripos($text, '/help') === 0) {
-    $msg  = "📚 *Commands:*\n";
-    $msg .= "/start - Welcome or retrieve via deep link\n";
-    $msg .= "/help - This help message\n";
-    $msg .= "/announce - *Admin only*: reply + /announce to broadcast\n\n";
-    $msg .= "🔖 *File Retrieval:* Send File ID or deep link.\n";
-    $msg .= "💾 *File Types:* All media and documents supported.";
-    sendMessage($chatId, $msg, $messageId);
-    exit;
-}
-
-// /announce
-if (stripos($text, '/announce') === 0) {
-    if ($userId != $adminId) {
-        sendMessage($chatId, "❌ *Unauthorized.* Only admin can broadcast.", $messageId);
-        exit;
-    }
-    if (isset($message['reply_to_message'])) {
-        $toBroadcast = $message['reply_to_message'];
+    // Handle /announce (admin only)
+    if (str_starts_with($text, "/announce") && $userId == $adminId) {
+        $msg = trim(str_replace("/announce", "", $text));
+        $users = json_decode(file_get_contents("users.json"), true) ?? [];
         foreach ($users as $u) {
-            copyMessage((int)$u, $chatId, $toBroadcast['message_id']);
+            sendMessage($u, "📢 Announcement:\n$msg");
         }
-        sendMessage($chatId, "✅ *Announcement sent to all users.*", $messageId);
-    } else {
-        sendMessage($chatId, "❌ *Usage:* Reply to a message with `/announce`.", $messageId);
+        sendMessage($chatId, "✅ Broadcast sent.");
     }
-    exit;
 }
 
-// ─── FILE UPLOAD HANDLING ────────────────────────────────────────────────
-$hasFile = isset($message['document']) || isset($message['photo']) || isset($message['video']) ||
-           isset($message['audio']) || isset($message['voice']) || isset($message['animation']) ||
-           isset($message['sticker']);
-
-if ($hasFile) {
-    $fwd = forwardToChannel($message);
-    if (!empty($fwd['result']['message_id'])) {
-        $newId   = $fwd['result']['message_id'];
-        $fileId  = buildFileId($userId, $newId);
-        $deepLink = "https://t.me/$botUsername?start=$fileId";
-
-        $msg  = "✅ *Your file has been saved!*\n\n";
-        $msg .= "📁 *File ID:* `$fileId`\n";
-        $msg .= "🔗 *Deep Link:* [$deepLink]($deepLink)\n\n";
-        $msg .= "📥 Send this File ID or click the link anytime to retrieve your file.";
-        sendMessage($chatId, $msg, $messageId);
-    } else {
-        sendMessage($chatId, "❌ *Failed to save the file.*", $messageId);
-    }
-    exit;
+function sendMessage($chatId, $text, $markdown = false) {
+    global $botToken;
+    file_get_contents("https://api.telegram.org/bot$botToken/sendMessage?" . http_build_query([
+        "chat_id" => $chatId,
+        "text" => $text,
+        "parse_mode" => $markdown ? "Markdown" : null
+    ]));
 }
 
-// ─── FILE RETRIEVAL VIA TEXT FILE ID ─────────────────────────────────────
-if ($text !== '' && preg_match('/^\d+_\d+_\d+$/', $text)) {
-    $info = parseFileId($text);
-    if (!$info) {
-        sendMessage($chatId, "❌ *Invalid File ID format.*", $messageId);
-        exit;
-    }
-    $res = copyMessage($chatId, $channelId, $info['message_id']);
-    if (empty($res['ok'])) {
-        sendMessage($chatId, "❌ *File not found or expired.*", $messageId);
-    }
-    exit;
-}
+function sendFile($chatId, $data) {
+    global $botToken;
+    $type = $data["type"];
+    $fileId = $data["file_id"];
+    $caption = $data["caption"] ?? '';
 
-// ─── UNKNOWN COMMAND ─────────────────────────────────────────────────────
-sendMessage($chatId, "❓ I didn't understand that. Send /help for commands.", $messageId);
-exit;
+    $url = "https://api.telegram.org/bot$botToken/send" . ucfirst($type);
+    file_get_contents($url . '?' . http_build_query([
+        "chat_id" => $chatId,
+        $type => $fileId,
+        "caption" => $caption,
+        "parse_mode" => "Markdown"
+    ]));
+}
